@@ -19,9 +19,10 @@ main = defaultMain $ testGroup "ut"
      \slist -> let list = map B8.pack slist
               in FlatSet.toList (FlatSet.fromList list) == List.nub (List.sort list)
   , SC.testProperty "notMember = not . member" $
-     \slist selm -> let list = map B8.pack slist
-                        elm  = B8.pack selm
-                    in FlatSet.notMember elm (FlatSet.fromList list) == not (FlatSet.member elm (FlatSet.fromList list))
+     \slist selm ->
+        let list = map B8.pack slist
+            elm  = B8.pack selm
+         in FlatSet.notMember elm (FlatSet.fromList list) == not (FlatSet.member elm (FlatSet.fromList list))
   , SC.testProperty "lookupGT = Set.lookupGT" $
      \slist -> let list = map B8.pack slist
                    fs   = FlatSet.fromList list

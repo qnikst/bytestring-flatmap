@@ -29,6 +29,7 @@ import           Control.Monad            (void)
 import           Control.Monad.ST         (ST)
 
 import           Foreign.ForeignPtr       (withForeignPtr)
+import           Foreign.Storable         (peekByteOff)
 import           Foreign.Ptr              (plusPtr)
 
 import qualified Data.List                as List
@@ -39,6 +40,9 @@ import qualified Data.ByteString.Internal as BI
 import qualified Data.Vector              as V
 import qualified Data.Vector.Mutable      as MV
 import qualified Data.Vector.Unboxed      as UV
+import           Data.Word                (Word8)
+import           Debug.Trace
+import System.IO.Unsafe
 
 data FlatSet = FlatSet
   { fsIndices :: !(UV.Vector (Int,Int))
@@ -154,6 +158,7 @@ lookupGE :: ByteString -> FlatSet -> Maybe ByteString
 lookupGE bs fs = valueAt (either snd id (lookupGeneric bs fs)) fs
 
 
+compareAt _ idx _  | trace (show idx) False = undefined
 compareAt fs idx (BI.PS fp1 off1 len1) =
     BI.accursedUnutterablePerformIO $
       withForeignPtr fp1 $ \p1 ->
@@ -167,6 +172,54 @@ compareAt fs idx (BI.PS fp1 off1 len1) =
     (BI.PS fp2 off2 _) = fsData fs
 {-# INLINE compareAt #-}
 
+compareZ _ idx _ j | trace (show (idx,j)) False = undefined
+compareZ fs idx (BI.PS fp1 off1 len1) j =
+    unsafePerformIO $
+      withForeignPtr fp1 $ \p1 ->
+      withForeignPtr fp2 $ \p2 -> do
+        traceM $ "memcmp " ++ show (off1 +j) ++ " " ++ show (off2 + off + j) ++ " " ++ show (min len1 len2 - j)
+        i <- BI.memcmp (p1 `plusPtr` (off1 + j)) (p2 `plusPtr` (off2 + off + j)) ((min len1 len2) - j)
+        traceM $ show i
+        if i == 0
+        then return $ case len1 `compare` len2 of
+                        LT -> (LT, len1)
+                        EQ -> (EQ, len1)
+                        GT -> (GT, len2)
+        else if i < 0
+             then return (LT, j-fromIntegral i+1)
+             else return (GT, j+fromIntegral i-1)
+  where
+    (!off, !len2) = UV.unsafeIndex (fsIndices fs) idx
+    (BI.PS fp2 off2 _) = fsData fs
+{-# INLINE compareZ #-}
+
+{-
+compareZ :: FlatSet -> Int -> ByteString -> Int -> (Ordering, Int)
+compareZ !fs !idx !bs@(BI.PS fp1 off1 len1) !i
+  | len1 > i && len2 > i = BI.accursedUnutterablePerformIO $
+      withForeignPtr fp1 $ \p1 ->
+      withForeignPtr fp2 $ \p2 ->
+        let loop !z = do
+              !b1 <- peekByteOff p1 (off1+z) :: IO Word8
+              !b2 <- peekByteOff p2 (off+z)  :: IO Word8
+              case b1 `compare` b2 of
+                LT -> return (LT, i)
+                EQ -> let z' = z+1
+                      in if len1 > z' && len2 > z' then loop z'
+                         else if len1 > z' then return (GT, z')
+                                           else if len2 == z' then return (EQ,z')
+                                                              else return (LT, z')
+                GT -> return (GT,i)
+        in loop i
+  | len1 == i = if len2 == i then (EQ,i) else (LT,i)
+  | otherwise = (GT,i)
+  where
+    (!off, !len2) = UV.unsafeIndex (fsIndices fs) idx
+    (BI.PS fp2 _ _) = fsData fs
+{-# INLINE compareZ #-}
+-}
+
+
 -- | /O(log n)/ Try to find index of the element in the 'FlatSet'.
 -- it if element is not found, return indices of the larger and
 -- smaller elements.
@@ -179,20 +232,20 @@ lookupGeneric bs fs =
     0 -> Left (-1,1) -- XXX: Looks terribly insane
     1 -> if compareAt fs 0 bs == EQ
          then Right 0
-         else Left (-1,1)
+         else Left (-1,2)
     n -> lookupInRange bs fs 0 n
 
 lookupInRange :: ByteString -> FlatSet -> Int -> Int -> Either (Int, Int) Int
-lookupInRange bs fs from to = go from to
+lookupInRange bs fs from to = go from to 0 0
   where
-    go !low !high
-       | low > high = Left (high, low)
-       | otherwise  = case compareAt fs mid bs of
-                        LT -> go low (mid-1)
-                        EQ -> Right mid
-                        GT -> go (mid+1) high
+    go !low !high !low_match !hi_match
+       | low > high = trace ("->" ++ show (low,high)) $ Left (high, low)
+       | otherwise  = case compareZ fs mid bs (min low_match hi_match) of
+                        (LT, new_match) -> go low (mid-1) low_match new_match
+                        (EQ, _) -> Right mid
+                        (GT, new_match) -> go (mid+1) high new_match low_match
        where
-         mid = low + ((high - low) `div` 2)
+         !mid = (low + high)`div` 2
 {-# INLINE lookupInRange #-}
 
 notMember :: ByteString -> FlatSet -> Bool
